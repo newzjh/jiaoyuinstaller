@@ -101,8 +101,10 @@ class AppUpdater(tk.Tk):
         
         # 构建UI
         self._build_ui()
-        # 加载本地版本号
+        # 加载本地版本号（缺失则初始化）
         self._load_local_version()
+        # 检查主程序是否存在
+        self._check_main_program_exists()
         
         # 启动时自动执行检查更新流程
         self.after(100, self._auto_update_flow)
@@ -181,10 +183,21 @@ class AppUpdater(tk.Tk):
         )
         self.run_btn.grid(row=0, column=2, padx=3, pady=2)
 
+    def _check_main_program_exists(self):
+        """检查主程序文件是否存在，不存在则标记需要强制更新"""
+        self.main_program_missing = not os.path.exists(self.config["main_program_path"])
+        if self.main_program_missing:
+            self._update_status(f"主程序文件缺失: {self.config['main_program_path']}")
+            self._update_status("将自动下载完整安装包...")
+
     def _auto_update_flow(self):
-        """自动更新流程：检查更新 -> 有更新则更新 -> 更新完成则运行程序"""
-        # 先执行检查更新
-        self._check_update_auto()
+        """自动更新流程：检查更新 -> 有更新/主程序缺失则更新 -> 更新完成则运行程序"""
+        if self.main_program_missing:
+            # 主程序缺失，直接触发更新
+            self._update_thread_auto()
+        else:
+            # 主程序存在，正常检查更新
+            self._check_update_auto()
 
     def _check_update_auto(self):
         """自动检查更新（带后续流程）"""
@@ -274,20 +287,31 @@ class AppUpdater(tk.Tk):
         self._run_program()
 
     def _load_local_version(self):
-        """加载本地版本号"""
+        """加载本地版本号（文件缺失则初始化）"""
         try:
             if os.path.exists(self.config["local_version_path"]):
                 with open(self.config["local_version_path"], "r") as f:
                     data = json.load(f)
                     self.local_version = data.get("version", "0.0.0")
                 self.local_version_label.config(text=self.local_version)
+            else:
+                # 版本文件不存在，初始化并保存初始版本
+                self._update_status("本地版本文件缺失，初始化版本信息...")
+                self.local_version = "0.0.0"
+                self._save_local_version(self.local_version)
+                self.local_version_label.config(text=self.local_version)
         except Exception as e:
             self._update_status(f"加载本地版本失败: {str(e)}")
+            # 加载失败也初始化版本文件
+            self.local_version = "0.0.0"
+            self._save_local_version(self.local_version)
             self.local_version_label.config(text="0.0.0")
 
     def _save_local_version(self, version: str):
-        """保存本地版本号"""
+        """保存本地版本号（自动创建目录）"""
         try:
+            # 确保版本文件所在目录存在
+            os.makedirs(os.path.dirname(self.config["local_version_path"]), exist_ok=True)
             with open(self.config["local_version_path"], "w") as f:
                 json.dump({"version": version}, f, indent=2)
             self.local_version = version
@@ -460,13 +484,17 @@ class AppUpdater(tk.Tk):
             return False
 
     def _run_program(self):
-        """运行主程序"""
+        """运行主程序（增加存在性检查）"""
         import subprocess
         
         try:
             program_path = self.config["main_program_path"]
             if not os.path.exists(program_path):
-                raise FileNotFoundError(f"程序文件不存在: {program_path}")
+                self._update_status(f"主程序文件不存在: {program_path}")
+                messagebox.warning("警告", "主程序文件缺失，请点击【检查更新】重新下载！")
+                self.run_btn.config(state=tk.DISABLED)
+                self.check_btn.config(state=tk.NORMAL)
+                return
             
             self._update_status("正在启动程序...")
             # 切换到程序所在目录运行，避免路径问题
