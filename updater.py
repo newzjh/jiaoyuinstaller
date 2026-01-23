@@ -92,7 +92,7 @@ class AppUpdater(tk.Tk):
         self.geometry("600x400")
         self.minsize(550, 380)
         
-        # 核心状态控制（新增：防止并发操作）
+        # 核心状态控制
         self.is_auto_running = False  # 标记自动流程是否在运行
         self.base_dir = BASE_DIR
         
@@ -200,7 +200,7 @@ class AppUpdater(tk.Tk):
         self.run_btn.grid(row=0, column=2, padx=3, pady=2)
 
     def _disable_all_buttons(self):
-        """禁用所有操作按钮（核心修复）"""
+        """禁用所有操作按钮"""
         self.check_btn.config(state=tk.DISABLED)
         self.update_btn.config(state=tk.DISABLED)
         self.run_btn.config(state=tk.DISABLED)
@@ -229,14 +229,14 @@ class AppUpdater(tk.Tk):
             logging.info("主程序文件存在")
 
     def _auto_update_flow(self):
-        """自动更新流程（核心修复：全程禁用按钮+先获取版本号）"""
+        """自动更新流程（核心调整：仅获取远程版本号，不提前同步）"""
         self.is_auto_running = True
         self._disable_all_buttons()  # 自动流程开始就禁用所有按钮
         
         try:
-            # 第一步：无论是否修复，先获取远程版本号（解决版本号未刷新问题）
+            # 第一步：仅获取远程版本号并刷新UI（不同步本地版本号）
             self._update_status("正在获取远程版本信息...")
-            self._fetch_remote_version()  # 单独获取版本号并刷新UI
+            self._fetch_remote_version()
             
             # 第二步：判断是否需要修复/更新
             if self.main_program_missing:
@@ -244,23 +244,25 @@ class AppUpdater(tk.Tk):
                 self._update_thread_auto(fix_mode=True)
             else:
                 self._check_update_auto()
-        finally:
-            # 自动流程结束后恢复按钮状态（在子线程完成后调用）
-            pass
+        except Exception as e:
+            logging.error(f"自动流程初始化失败: {str(e)}")
+            self._update_status(f"初始化失败: {str(e)}")
+            self._enable_buttons_normal()
+            self.is_auto_running = False
 
     @retry(max_retries=3, delay=1)
     def _fetch_remote_version(self):
-        """单独获取远程版本号（确保UI刷新）"""
+        """单独获取远程版本号（仅刷新UI，不修改本地版本）"""
         try:
             response = requests.get(self.config["remote_version_url"], timeout=10)
             response.raise_for_status()
             remote_data = response.json()
             self.remote_version = remote_data.get("version", "0.0.0")
             
-            # 强制刷新UI（核心修复：确保版本号显示）
+            # 仅刷新远程版本号UI，不修改本地版本
             self.remote_version_label.config(text=self.remote_version)
             self.update_idletasks()
-            logging.info(f"远程版本号获取成功：{self.remote_version}")
+            logging.info(f"远程版本号获取成功：{self.remote_version}，本地版本号仍为：{self.local_version}")
         except Exception as e:
             logging.error(f"获取远程版本号失败: {str(e)}")
             raise
@@ -307,7 +309,7 @@ class AppUpdater(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _perform_update_auto(self, fix_mode=False):
-        """执行自动更新/修复流程"""
+        """执行自动更新/修复流程（核心调整：仅在解压完成后同步版本号）"""
         status_text = "开始修复下载主程序..." if fix_mode else "开始下载更新包..."
         self._update_status(status_text)
         
@@ -336,9 +338,12 @@ class AppUpdater(tk.Tk):
             self._update_status("解压失败")
             return
         
-        # 4. 更新版本号（修复模式不更新）
-        if not fix_mode:
-            self._save_local_version(self.remote_version)
+        # 4. 核心调整：仅在下载解压完成后，同步本地版本号（关键时机）
+        self._update_status(f"同步本地版本号为 {self.remote_version}...")
+        self._save_local_version(self.remote_version)  # 写入版本文件
+        self.local_version = self.remote_version  # 更新内存中的本地版本号
+        self.local_version_label.config(text=self.local_version)  # 刷新本地版本UI
+        self.update_idletasks()
         
         # 5. 清理临时文件
         if os.path.exists(self.config["archive_save_path"]):
@@ -347,7 +352,7 @@ class AppUpdater(tk.Tk):
         # 6. 完成提示并运行程序
         finish_text = "主程序修复完成！" if fix_mode else "更新完成！"
         self._update_status(finish_text)
-        logging.info(finish_text)
+        logging.info(f"{finish_text} 本地版本号已同步为：{self.local_version}（仅在解压完成后同步）")
         
         # 重新检查主程序
         self._check_main_program_exists()
@@ -356,38 +361,44 @@ class AppUpdater(tk.Tk):
         self._run_program()
 
     def _load_local_version(self):
-        """加载本地版本号"""
+        """加载本地版本号（仅读取，不提前同步）"""
         try:
             if os.path.exists(self.config["local_version_path"]):
-                with open(self.config["local_version_path"], "r") as f:
+                with open(self.config["local_version_path"], "r", encoding="utf-8") as f:
                     data = json.load(f)
                     self.local_version = data.get("version", "0.0.0")
                 self.local_version_label.config(text=self.local_version)
+                logging.info(f"加载本地版本号：{self.local_version}")
             else:
-                self._update_status("本地版本文件缺失，初始化版本信息...")
+                self._update_status("本地版本文件缺失，初始化版本信息为0.0.0...")
                 self.local_version = "0.0.0"
-                self._save_local_version(self.local_version)
+                self._save_local_version(self.local_version)  # 仅初始化，不同步远程
                 self.local_version_label.config(text=self.local_version)
-            logging.info(f"加载本地版本号：{self.local_version}")
+                logging.info("本地版本文件缺失，已初始化为0.0.0（未同步远程）")
         except Exception as e:
             error_msg = f"加载本地版本失败: {str(e)}"
             self._update_status(error_msg)
             logging.error(error_msg)
+            # 加载失败时仅初始化，不同步远程
+            self.local_version = "0.0.0"
+            self._save_local_version(self.local_version)
             self.local_version_label.config(text="0.0.0")
 
     def _save_local_version(self, version: str):
-        """保存本地版本号"""
+        """保存本地版本号（增强可靠性，仅在解压完成后调用）"""
         try:
+            # 确保目录存在
             os.makedirs(os.path.dirname(self.config["local_version_path"]), exist_ok=True)
-            with open(self.config["local_version_path"], "w") as f:
-                json.dump({"version": version}, f, indent=2)
-            self.local_version = version
-            self.local_version_label.config(text=version)
-            logging.info(f"保存本地版本号：{version}")
+            # 写入版本文件（指定编码，避免乱码）
+            with open(self.config["local_version_path"], "w", encoding="utf-8") as f:
+                json.dump({"version": version}, f, indent=2, ensure_ascii=False)
+            logging.info(f"本地版本号已写入文件：{version}，路径：{self.config['local_version_path']}")
         except Exception as e:
             error_msg = f"保存版本号失败: {str(e)}"
             self._update_status(error_msg)
             logging.error(error_msg)
+            # 保存失败时弹窗提示
+            messagebox.warning("警告", f"版本号保存失败:\n{str(e)}\n可能导致后续更新异常！")
 
     def _update_status(self, text: str):
         """更新状态文本"""
@@ -407,7 +418,7 @@ class AppUpdater(tk.Tk):
         self.update_idletasks()
 
     def _check_update_thread(self):
-        """手动检查更新线程（新增：防止并发）"""
+        """手动检查更新线程"""
         if self.is_auto_running:
             messagebox.showinfo("提示", "自动更新流程正在运行，请稍后再试！")
             return
@@ -415,12 +426,12 @@ class AppUpdater(tk.Tk):
         threading.Thread(target=self._check_update, daemon=True).start()
 
     def _check_update(self):
-        """手动检查远程版本"""
+        """手动检查远程版本（仅获取，不提前同步）"""
         self._disable_all_buttons()
         self._update_status("正在检查更新...")
         
         try:
-            # 先获取最新版本号
+            # 先获取最新版本号（仅刷新UI，不修改本地版本）
             self._fetch_remote_version()
             
             compare_result = compare_versions(self.remote_version, self.local_version)
@@ -463,7 +474,7 @@ class AppUpdater(tk.Tk):
         threading.Thread(target=self._perform_update_manual, args=(fix_mode,), daemon=True).start()
 
     def _perform_update_manual(self, fix_mode=False):
-        """手动执行更新/修复流程"""
+        """手动执行更新/修复流程（同步逻辑与自动流程一致）"""
         self._disable_all_buttons()
         status_text = "开始修复下载主程序..." if fix_mode else "开始下载更新包..."
         self._update_status(status_text)
@@ -494,9 +505,12 @@ class AppUpdater(tk.Tk):
                 self._update_status("解压失败")
                 return
             
-            # 4. 更新版本号（修复模式不更新）
-            if not fix_mode:
-                self._save_local_version(self.remote_version)
+            # 4. 仅在解压完成后同步版本号
+            self._update_status(f"同步本地版本号为 {self.remote_version}...")
+            self._save_local_version(self.remote_version)
+            self.local_version = self.remote_version
+            self.local_version_label.config(text=self.local_version)
+            self.update_idletasks()
             
             # 5. 清理临时文件
             if os.path.exists(self.config["archive_save_path"]):
@@ -505,7 +519,7 @@ class AppUpdater(tk.Tk):
             # 6. 完成提示
             finish_text = "主程序修复完成！" if fix_mode else "更新完成！"
             self._update_status(finish_text)
-            logging.info(finish_text)
+            logging.info(f"{finish_text} 本地版本号已同步为：{self.local_version}（手动操作，解压完成后同步）")
             
             # 重新检查主程序
             self._check_main_program_exists()
