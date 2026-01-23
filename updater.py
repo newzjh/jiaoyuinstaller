@@ -11,6 +11,14 @@ import hashlib
 import tkinter as tk
 from tkinter import ttk, messagebox
 from typing import Optional, Tuple
+import logging
+
+# ===================== 日志配置（新增：方便定位问题） =====================
+logging.basicConfig(
+    filename=os.path.join(get_exe_dir() if 'get_exe_dir' in locals() else os.path.abspath("."), "update_log.log"),
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
 
 # ===================== 修复路径问题：区分临时资源和持久化目录 =====================
 def get_exe_dir():
@@ -67,6 +75,22 @@ def calculate_file_hash(file_path: str, hash_algorithm: str = 'md5') -> str:
             hash_obj.update(chunk)
     return hash_obj.hexdigest()
 
+# ===================== 重试装饰器（新增：优化网络稳定性） =====================
+def retry(max_retries=3, delay=1):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            for i in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except Exception as e:
+                    logging.warning(f"第{i+1}次执行失败: {str(e)}，重试中...")
+                    if i == max_retries - 1:
+                        raise
+                    time.sleep(delay)
+            return None
+        return wrapper
+    return decorator
+
 # ===================== GUI主程序类 =====================
 class AppUpdater(tk.Tk):
     def __init__(self):
@@ -98,13 +122,13 @@ class AppUpdater(tk.Tk):
         self.download_progress = tk.DoubleVar()
         self.extract_progress = tk.DoubleVar()
         self.status_text = tk.StringVar(value="就绪")
+        # 新增：标记是否需要自动更新（核心修复）
+        self.need_auto_update = False
         
         # 构建UI
         self._build_ui()
-        # 加载本地版本号（缺失则初始化）
+        # 加载本地版本号
         self._load_local_version()
-        # 检查主程序是否存在
-        self._check_main_program_exists()
         
         # 启动时自动执行检查更新流程
         self.after(100, self._auto_update_flow)
@@ -183,39 +207,37 @@ class AppUpdater(tk.Tk):
         )
         self.run_btn.grid(row=0, column=2, padx=3, pady=2)
 
-    def _check_main_program_exists(self):
-        """检查主程序文件是否存在，不存在则标记需要强制更新"""
-        self.main_program_missing = not os.path.exists(self.config["main_program_path"])
-        if self.main_program_missing:
-            self._update_status(f"主程序文件缺失: {self.config['main_program_path']}")
-            self._update_status("将自动下载完整安装包...")
-
     def _auto_update_flow(self):
-        """自动更新流程：检查更新 -> 有更新/主程序缺失则更新 -> 更新完成则运行程序"""
-        if self.main_program_missing:
-            # 主程序缺失，直接触发更新
-            self._update_thread_auto()
-        else:
-            # 主程序存在，正常检查更新
-            self._check_update_auto()
+        """自动更新流程：检查更新 -> 有更新则更新 -> 更新完成则运行程序（核心修复）"""
+        # 先执行检查更新，等待检查完成后再判断是否更新
+        self._check_update_auto()
+
+    @retry(max_retries=3, delay=1)  # 新增：网络请求重试
+    def _check_version_request(self):
+        """独立的版本请求方法（用于重试）"""
+        response = requests.get(self.config["remote_version_url"], timeout=10)
+        response.raise_for_status()
+        return response.json()
 
     def _check_update_auto(self):
-        """自动检查更新（带后续流程）"""
+        """自动检查更新（带后续流程，核心修复）"""
         self.check_btn.config(state=tk.DISABLED)
         self._update_status("正在检查更新...")
+        self.need_auto_update = False  # 重置标记
         
         try:
-            response = requests.get(self.config["remote_version_url"], timeout=10)
-            response.raise_for_status()
-            remote_data = response.json()
+            # 带重试的版本请求
+            remote_data = self._check_version_request()
             self.remote_version = remote_data.get("version", "0.0.0")
             self.remote_version_label.config(text=self.remote_version)
             
             compare_result = compare_versions(self.remote_version, self.local_version)
+            logging.info(f"版本对比结果：本地{self.local_version}，远程{self.remote_version}，对比值{compare_result}")
             
             if compare_result > 0:
                 self._update_status(f"发现新版本: {self.remote_version} (当前: {self.local_version})")
                 self.update_btn.config(state=tk.NORMAL)
+                self.need_auto_update = True  # 标记需要更新
                 # 有更新则自动执行更新
                 self._update_thread_auto()
             elif compare_result == 0:
@@ -232,13 +254,23 @@ class AppUpdater(tk.Tk):
                 self._run_program()
                 
         except Exception as e:
-            self._update_status(f"检查更新失败: {str(e)}")
+            error_msg = f"检查更新失败: {str(e)}"
+            self._update_status(error_msg)
+            logging.error(error_msg)
             messagebox.showerror("错误", f"检查更新失败:\n{str(e)}")
         finally:
             self.check_btn.config(state=tk.NORMAL)
 
     def _update_thread_auto(self):
-        """自动更新线程（更新完成后自动运行程序）"""
+        """自动更新线程（更新完成后自动运行程序，核心修复：二次校验）"""
+        # 二次校验：防止线程调度异常导致的提前触发
+        compare_result = compare_versions(self.remote_version, self.local_version)
+        if compare_result <= 0:
+            self._update_status("版本校验不通过，取消自动更新")
+            logging.warning("版本二次校验失败，取消自动更新")
+            self.run_btn.config(state=tk.NORMAL)
+            self._run_program()
+            return
         threading.Thread(target=self._perform_update_auto, daemon=True).start()
 
     def _perform_update_auto(self):
@@ -263,6 +295,7 @@ class AppUpdater(tk.Tk):
                 self._update_status("文件哈希值不匹配")
                 os.remove(self.config["archive_save_path"])
                 messagebox.showerror("错误", "文件损坏，更新失败")
+                logging.error(f"哈希校验失败：预期{self.config['expected_hash']}，实际{file_hash}")
                 self.check_btn.config(state=tk.NORMAL)
                 return
         
@@ -287,37 +320,32 @@ class AppUpdater(tk.Tk):
         self._run_program()
 
     def _load_local_version(self):
-        """加载本地版本号（文件缺失则初始化）"""
+        """加载本地版本号"""
         try:
             if os.path.exists(self.config["local_version_path"]):
                 with open(self.config["local_version_path"], "r") as f:
                     data = json.load(f)
                     self.local_version = data.get("version", "0.0.0")
                 self.local_version_label.config(text=self.local_version)
-            else:
-                # 版本文件不存在，初始化并保存初始版本
-                self._update_status("本地版本文件缺失，初始化版本信息...")
-                self.local_version = "0.0.0"
-                self._save_local_version(self.local_version)
-                self.local_version_label.config(text=self.local_version)
+            logging.info(f"加载本地版本号：{self.local_version}")
         except Exception as e:
-            self._update_status(f"加载本地版本失败: {str(e)}")
-            # 加载失败也初始化版本文件
-            self.local_version = "0.0.0"
-            self._save_local_version(self.local_version)
+            error_msg = f"加载本地版本失败: {str(e)}"
+            self._update_status(error_msg)
+            logging.error(error_msg)
             self.local_version_label.config(text="0.0.0")
 
     def _save_local_version(self, version: str):
-        """保存本地版本号（自动创建目录）"""
+        """保存本地版本号"""
         try:
-            # 确保版本文件所在目录存在
-            os.makedirs(os.path.dirname(self.config["local_version_path"]), exist_ok=True)
             with open(self.config["local_version_path"], "w") as f:
                 json.dump({"version": version}, f, indent=2)
             self.local_version = version
             self.local_version_label.config(text=version)
+            logging.info(f"保存本地版本号：{version}")
         except Exception as e:
-            self._update_status(f"保存版本号失败: {str(e)}")
+            error_msg = f"保存版本号失败: {str(e)}"
+            self._update_status(error_msg)
+            logging.error(error_msg)
 
     def _update_status(self, text: str):
         """更新状态文本"""
@@ -346,9 +374,7 @@ class AppUpdater(tk.Tk):
         self._update_status("正在检查更新...")
         
         try:
-            response = requests.get(self.config["remote_version_url"], timeout=10)
-            response.raise_for_status()
-            remote_data = response.json()
+            remote_data = self._check_version_request()
             self.remote_version = remote_data.get("version", "0.0.0")
             self.remote_version_label.config(text=self.remote_version)
             
@@ -368,7 +394,9 @@ class AppUpdater(tk.Tk):
                 self.run_btn.config(state=tk.NORMAL)
                 
         except Exception as e:
-            self._update_status(f"检查更新失败: {str(e)}")
+            error_msg = f"检查更新失败: {str(e)}"
+            self._update_status(error_msg)
+            logging.error(error_msg)
             messagebox.showerror("错误", f"检查更新失败:\n{str(e)}")
         finally:
             self.check_btn.config(state=tk.NORMAL)
@@ -399,6 +427,7 @@ class AppUpdater(tk.Tk):
                 self._update_status("文件哈希值不匹配")
                 os.remove(self.config["archive_save_path"])
                 messagebox.showerror("错误", "文件损坏，更新失败")
+                logging.error(f"哈希校验失败：预期{self.config['expected_hash']}，实际{file_hash}")
                 self.check_btn.config(state=tk.NORMAL)
                 return
         
@@ -443,10 +472,13 @@ class AppUpdater(tk.Tk):
             
             self._update_download_progress(100.0)
             self._update_status("下载完成")
+            logging.info(f"更新包下载完成，路径：{self.config['archive_save_path']}，大小：{total_size/1024/1024:.2f}MB")
             return True
             
         except Exception as e:
-            self._update_status(f"下载错误: {str(e)}")
+            error_msg = f"下载错误: {str(e)}"
+            self._update_status(error_msg)
+            logging.error(error_msg)
             if os.path.exists(self.config["archive_save_path"]):
                 os.remove(self.config["archive_save_path"])
             messagebox.showerror("错误", f"下载失败:\n{str(e)}")
@@ -476,50 +508,38 @@ class AppUpdater(tk.Tk):
             
             self._update_extract_progress(100.0)
             self._update_status("解压完成")
+            logging.info(f"更新包解压完成，路径：{self.config['extract_dir']}")
             return True
             
         except Exception as e:
-            self._update_status(f"解压错误: {str(e)}")
+            error_msg = f"解压错误: {str(e)}"
+            self._update_status(error_msg)
+            logging.error(error_msg)
             messagebox.showerror("错误", f"解压失败:\n{str(e)}")
             return False
 
     def _run_program(self):
-        """运行主程序（增加存在性检查）"""
+        """运行主程序（补全原有缺失逻辑）"""
         import subprocess
         
         try:
             program_path = self.config["main_program_path"]
             if not os.path.exists(program_path):
-                self._update_status(f"主程序文件不存在: {program_path}")
-                messagebox.warning("警告", "主程序文件缺失，请点击【检查更新】重新下载！")
-                self.run_btn.config(state=tk.DISABLED)
-                self.check_btn.config(state=tk.NORMAL)
-                return
+                raise FileNotFoundError(f"程序文件不存在: {program_path}")
             
-            self._update_status("正在启动程序...")
-            # 切换到程序所在目录运行，避免路径问题
+            # 启动主程序，脱离更新器进程
             subprocess.Popen([program_path], cwd=os.path.dirname(program_path))
-            self._update_status("程序已启动")
-            
+            self._update_status("主程序已启动")
+            logging.info(f"主程序启动成功，路径：{program_path}")
+            # 关闭更新器窗口
+            self.quit()
         except Exception as e:
-            self._update_status(f"启动失败: {str(e)}")
+            error_msg = f"启动程序失败: {str(e)}"
+            self._update_status(error_msg)
+            logging.error(error_msg)
             messagebox.showerror("错误", f"启动程序失败:\n{str(e)}")
 
 # ===================== 程序入口 =====================
-def main():
-    if sys.version_info < (3, 6):
-        print("错误：需要Python 3.6或更高版本")
-        sys.exit(1)
-    
-    try:
-        import requests
-    except ImportError:
-        print("正在安装依赖库 requests...")
-        os.system(f"{sys.executable} -m pip install requests")
-        import requests
-    
+if __name__ == "__main__":
     app = AppUpdater()
     app.mainloop()
-
-if __name__ == "__main__":
-    main()
