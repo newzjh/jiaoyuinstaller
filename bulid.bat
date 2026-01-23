@@ -1,0 +1,1 @@
+pyinstaller -F -w --clean --name "setup" --icon=your_icon.ico updater.py
