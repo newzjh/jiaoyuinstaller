@@ -83,11 +83,11 @@ class AppUpdater(tk.Tk):
             # 版本文件、解压目录、临时压缩包都放在exe所在目录
             "local_version_path": os.path.join(self.base_dir, "local_version.json"),
             "remote_version_url": "http://49.51.50.251/jiaoyu/version.json",
-            "remote_archive_url": "http://49.51.50.251/jiaoyu/jiaoyu5_win.zip",
+            "remote_archive_url": "http://49.51.50.251/jiaoyu/jiaoyu_win.zip",
             "archive_save_path": os.path.join(self.base_dir, "temp_update.zip"),
             "extract_dir": os.path.join(self.base_dir, "installed_program"),  # 解压到exe同目录
-            # 核心修改：主程序路径改为 installed_program/jiaoyu5_win/LuckyAi.exe
-            "main_program_path": os.path.join(self.base_dir, "installed_program/jiaoyu5_win/LuckyAi.exe"),
+            # 核心修改：主程序路径改为 installed_program/jiaoyu_win/LuckyAi.exe
+            "main_program_path": os.path.join(self.base_dir, "installed_program/jiaoyu_win/LuckyAi.exe"),
             "expected_hash": None,
             "hash_algorithm": "md5"
         }
@@ -103,6 +103,9 @@ class AppUpdater(tk.Tk):
         self._build_ui()
         # 加载本地版本号
         self._load_local_version()
+        
+        # 启动时自动执行检查更新流程
+        self.after(100, self._auto_update_flow)
 
     def _build_ui(self):
         """构建GUI界面"""
@@ -178,6 +181,98 @@ class AppUpdater(tk.Tk):
         )
         self.run_btn.grid(row=0, column=2, padx=3, pady=2)
 
+    def _auto_update_flow(self):
+        """自动更新流程：检查更新 -> 有更新则更新 -> 更新完成则运行程序"""
+        # 先执行检查更新
+        self._check_update_auto()
+
+    def _check_update_auto(self):
+        """自动检查更新（带后续流程）"""
+        self.check_btn.config(state=tk.DISABLED)
+        self._update_status("正在检查更新...")
+        
+        try:
+            response = requests.get(self.config["remote_version_url"], timeout=10)
+            response.raise_for_status()
+            remote_data = response.json()
+            self.remote_version = remote_data.get("version", "0.0.0")
+            self.remote_version_label.config(text=self.remote_version)
+            
+            compare_result = compare_versions(self.remote_version, self.local_version)
+            
+            if compare_result > 0:
+                self._update_status(f"发现新版本: {self.remote_version} (当前: {self.local_version})")
+                self.update_btn.config(state=tk.NORMAL)
+                # 有更新则自动执行更新
+                self._update_thread_auto()
+            elif compare_result == 0:
+                self._update_status("当前已是最新版本")
+                self.update_btn.config(state=tk.DISABLED)
+                self.run_btn.config(state=tk.NORMAL)
+                # 无更新则直接运行程序
+                self._run_program()
+            else:
+                self._update_status(f"本地版本较新: {self.local_version} (远程: {self.remote_version})")
+                self.update_btn.config(state=tk.DISABLED)
+                self.run_btn.config(state=tk.NORMAL)
+                # 本地版本更新则直接运行程序
+                self._run_program()
+                
+        except Exception as e:
+            self._update_status(f"检查更新失败: {str(e)}")
+            messagebox.showerror("错误", f"检查更新失败:\n{str(e)}")
+        finally:
+            self.check_btn.config(state=tk.NORMAL)
+
+    def _update_thread_auto(self):
+        """自动更新线程（更新完成后自动运行程序）"""
+        threading.Thread(target=self._perform_update_auto, daemon=True).start()
+
+    def _perform_update_auto(self):
+        """执行自动更新流程（更新完成后自动运行）"""
+        self.update_btn.config(state=tk.DISABLED)
+        self._update_status("开始下载更新包...")
+        
+        # 1. 下载压缩包
+        if not self._download_archive():
+            self._update_status("下载失败")
+            self.check_btn.config(state=tk.NORMAL)
+            return
+        
+        # 2. 验证文件完整性
+        if self.config["expected_hash"]:
+            self._update_status("验证文件完整性...")
+            file_hash = calculate_file_hash(
+                self.config["archive_save_path"],
+                self.config["hash_algorithm"]
+            )
+            if file_hash != self.config["expected_hash"]:
+                self._update_status("文件哈希值不匹配")
+                os.remove(self.config["archive_save_path"])
+                messagebox.showerror("错误", "文件损坏，更新失败")
+                self.check_btn.config(state=tk.NORMAL)
+                return
+        
+        # 3. 解压文件
+        self._update_status("开始解压文件...")
+        if not self._extract_archive():
+            self._update_status("解压失败")
+            self.check_btn.config(state=tk.NORMAL)
+            return
+        
+        # 4. 更新本地版本号
+        self._save_local_version(self.remote_version)
+        self._update_status("更新完成！")
+        self.run_btn.config(state=tk.NORMAL)
+        self.check_btn.config(state=tk.NORMAL)
+        
+        # 清理临时压缩包
+        if os.path.exists(self.config["archive_save_path"]):
+            os.remove(self.config["archive_save_path"])
+        
+        # 自动运行程序
+        self._run_program()
+
     def _load_local_version(self):
         """加载本地版本号"""
         try:
@@ -218,11 +313,11 @@ class AppUpdater(tk.Tk):
         self.update_idletasks()
 
     def _check_update_thread(self):
-        """线程：检查更新"""
+        """线程：手动检查更新（保留原有功能）"""
         threading.Thread(target=self._check_update, daemon=True).start()
 
     def _check_update(self):
-        """检查远程版本并对比"""
+        """手动检查远程版本并对比（保留原有功能）"""
         self.check_btn.config(state=tk.DISABLED)
         self._update_status("正在检查更新...")
         
@@ -255,11 +350,11 @@ class AppUpdater(tk.Tk):
             self.check_btn.config(state=tk.NORMAL)
 
     def _update_thread(self):
-        """线程：执行更新"""
+        """线程：手动执行更新（保留原有功能）"""
         threading.Thread(target=self._perform_update, daemon=True).start()
 
     def _perform_update(self):
-        """执行更新流程"""
+        """手动执行更新流程（保留原有功能）"""
         self.update_btn.config(state=tk.DISABLED)
         self._update_status("开始下载更新包...")
         
