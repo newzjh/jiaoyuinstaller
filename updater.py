@@ -88,7 +88,7 @@ def retry(max_retries=3, delay=1):
 class AppUpdater(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("程序自动更新器")
+        self.title("LuckyAI程序自动更新器")
         self.geometry("600x400")
         self.minsize(550, 380)
         
