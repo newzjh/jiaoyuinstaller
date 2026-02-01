@@ -728,17 +728,23 @@ class AppUpdater(tk.Tk):
             desktop_path = get_desktop_path()
             if desktop_path:
                 desktop_shortcut = os.path.join(desktop_path, shortcut_name)
-                success = create_shortcut(program_path, desktop_shortcut, description, icon_path)
-                if not success:
-                    logging.warning("桌面快捷方式创建失败，但不影响程序运行")
+                if not os.path.exists(desktop_shortcut):
+                    success = create_shortcut(program_path, desktop_shortcut, description, icon_path)
+                    if not success:
+                        logging.warning("桌面快捷方式创建失败，但不影响程序运行")
+                else:
+                    logging.info("桌面快捷方式已存在，跳过创建")
             
             # 创建开始菜单快捷方式
             start_menu_path = get_start_menu_path()
             if start_menu_path:
                 start_menu_shortcut = os.path.join(start_menu_path, shortcut_name)
-                success = create_shortcut(program_path, start_menu_shortcut, description, icon_path)
-                if not success:
-                    logging.warning("开始菜单快捷方式创建失败，但不影响程序运行")
+                if not os.path.exists(start_menu_shortcut):
+                    success = create_shortcut(program_path, start_menu_shortcut, description, icon_path)
+                    if not success:
+                        logging.warning("开始菜单快捷方式创建失败，但不影响程序运行")
+                else:
+                    logging.info("开始菜单快捷方式已存在，跳过创建")
             
             logging.info("快捷方式创建流程完成")
         except Exception as e:
