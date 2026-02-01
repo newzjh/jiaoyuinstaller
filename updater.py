@@ -14,6 +14,15 @@ from typing import Optional, Tuple
 import logging
 import time
 
+# Windows平台特定导入
+try:
+    import win32com.client
+    import winreg
+    import pythoncom
+    WINDOWS = True
+except ImportError:
+    WINDOWS = False
+
 # ===================== 基础配置与工具函数 =====================
 def get_exe_dir():
     """获取当前exe/脚本所在的永久目录"""
@@ -83,6 +92,90 @@ def retry(max_retries=3, delay=1):
             return None
         return wrapper
     return decorator
+
+def create_shortcut(target_path, shortcut_path, description="", icon_path=None):
+    """创建Windows快捷方式
+    
+    Args:
+        target_path: 目标文件路径
+        shortcut_path: 快捷方式保存路径
+        description: 快捷方式描述
+        icon_path: 图标路径
+    """
+    if not WINDOWS:
+        return False
+    
+    try:
+        # 初始化COM库
+        pythoncom.CoInitialize()
+        
+        # 确保目标目录存在
+        shortcut_dir = os.path.dirname(shortcut_path)
+        if shortcut_dir and not os.path.exists(shortcut_dir):
+            try:
+                os.makedirs(shortcut_dir, exist_ok=True)
+                logging.info(f"创建目录成功: {shortcut_dir}")
+            except Exception as dir_error:
+                logging.warning(f"创建目录失败: {str(dir_error)}，将尝试直接创建快捷方式")
+        
+        shell = win32com.client.Dispatch('WScript.Shell')
+        shortcut = shell.CreateShortCut(shortcut_path)
+        shortcut.TargetPath = target_path
+        shortcut.WorkingDirectory = os.path.dirname(target_path)
+        if description:
+            shortcut.Description = description
+        if icon_path:
+            shortcut.IconLocation = icon_path
+        shortcut.Save()
+        logging.info(f"快捷方式创建成功: {shortcut_path}")
+        return True
+    except PermissionError:
+        logging.warning(f"创建快捷方式无权限: {shortcut_path}，可能需要管理员权限或被安全软件阻止")
+        return False
+    except Exception as e:
+        logging.error(f"创建快捷方式失败: {str(e)}")
+        return False
+    finally:
+        # 释放COM库
+        try:
+            pythoncom.CoUninitialize()
+        except:
+            pass
+
+def get_desktop_path():
+    """获取桌面路径"""
+    if not WINDOWS:
+        return ""
+    
+    try:
+        # 初始化COM库
+        pythoncom.CoInitialize()
+        
+        shell = win32com.client.Dispatch('WScript.Shell')
+        result = shell.SpecialFolders('Desktop')
+        return result
+    except Exception as e:
+        logging.error(f"获取桌面路径失败: {str(e)}")
+        return os.path.join(os.path.expanduser('~'), 'Desktop')
+    finally:
+        # 释放COM库
+        try:
+            pythoncom.CoUninitialize()
+        except:
+            pass
+
+def get_start_menu_path():
+    """获取开始菜单路径"""
+    if not WINDOWS:
+        return ""
+    
+    try:
+        # 获取当前用户的开始菜单程序目录
+        start_menu = os.path.join(os.path.expanduser('~'), 'AppData', 'Roaming', 'Microsoft', 'Windows', 'Start Menu', 'Programs')
+        return start_menu
+    except Exception as e:
+        logging.error(f"获取开始菜单路径失败: {str(e)}")
+        return ""
 
 # ===================== GUI主程序类 =====================
 class AppUpdater(tk.Tk):
@@ -604,6 +697,10 @@ class AppUpdater(tk.Tk):
             if not os.path.exists(program_path):
                 raise FileNotFoundError(f"程序文件不存在: {program_path}")
             
+            # 在Windows平台下创建快捷方式
+            if WINDOWS:
+                self._create_shortcuts(program_path)
+            
             subprocess.Popen([program_path], cwd=os.path.dirname(program_path))
             self._update_status("主程序已启动")
             logging.info(f"主程序启动成功，路径：{program_path}")
@@ -613,6 +710,41 @@ class AppUpdater(tk.Tk):
             self._update_status(error_msg)
             logging.error(error_msg)
             messagebox.showerror("错误", f"启动程序失败:\n{str(e)}")
+    
+    def _create_shortcuts(self, program_path):
+        """创建桌面快捷方式和开始菜单快捷方式"""
+        if not WINDOWS:
+            return
+        
+        try:
+            # 获取快捷方式名称
+            shortcut_name = "LuckyAI.lnk"
+            description = "LuckyAI登录器"
+            
+            # 获取图标路径（使用程序自身作为图标）
+            icon_path = program_path
+            
+            # 创建桌面快捷方式
+            desktop_path = get_desktop_path()
+            if desktop_path:
+                desktop_shortcut = os.path.join(desktop_path, shortcut_name)
+                success = create_shortcut(program_path, desktop_shortcut, description, icon_path)
+                if not success:
+                    logging.warning("桌面快捷方式创建失败，但不影响程序运行")
+            
+            # 创建开始菜单快捷方式
+            start_menu_path = get_start_menu_path()
+            if start_menu_path:
+                start_menu_shortcut = os.path.join(start_menu_path, shortcut_name)
+                success = create_shortcut(program_path, start_menu_shortcut, description, icon_path)
+                if not success:
+                    logging.warning("开始菜单快捷方式创建失败，但不影响程序运行")
+            
+            logging.info("快捷方式创建流程完成")
+        except Exception as e:
+            logging.error(f"创建快捷方式过程中出错: {str(e)}")
+            # 即使出错也不影响主程序运行
+            pass
 
 # ===================== 程序入口 =====================
 if __name__ == "__main__":
@@ -626,6 +758,22 @@ if __name__ == "__main__":
         messagebox.showinfo("提示", "正在安装依赖库 requests...")
         os.system(f"{sys.executable} -m pip install requests")
         import requests
+    
+    # 检查并安装pywin32库（Windows平台需要）
+    if WINDOWS:
+        try:
+            import win32com.client
+            import winreg
+        except ImportError:
+            messagebox.showinfo("提示", "正在安装依赖库 pywin32...")
+            os.system(f"{sys.executable} -m pip install pywin32")
+            try:
+                import win32com.client
+                import winreg
+                WINDOWS = True
+            except ImportError:
+                WINDOWS = False
+                logging.warning("安装pywin32失败，将无法创建快捷方式")
     
     app = AppUpdater()
     app.mainloop()
